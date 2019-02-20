@@ -17,19 +17,21 @@
 - Recursive chown for mounts can now be toggled with the [ROOK_ENABLE_FSGROUP](https://github.com/rook/rook/issues/2254) environment variable.
 - Added the dashboard `port` configuration setting.
 - Added the dashboard `ssl` configuration setting.
+- Added Ceph CSI driver deployments on Kubernetes 1.13 and above.
 
 ## Breaking Changes
 
 - Rook no longer supports Kubernetes `1.8` and `1.9`.
 - Rook no longer supports running more than one monitor on the same node when `hostNetwork` and `allowMultiplePerNode` are `true`.
+- Rook Operator switches from Extensions v1beta1 to use Apps v1 API for DaemonSet and Deployment.
 
 ### Ceph
 
 - Rook will no longer create a directory-based osd in the `dataDirHostPath` if no directories or
   devices are specified or if there are no disks on the host.
-- Containers in `mon` pods have been removed and/or changed names.
-- Config paths in `mon` containers are now always the Ceph default paths
-  (`/etc/ceph`, `/var/lib/ceph`) regardless of the `dataDirHostPath` setting.
+- Containers in `mon` and `mgr` pods have been removed and/or changed names.
+- Config paths in `mon` and `mgr` containers are now always the Ceph default paths
+  (`/etc/ceph`, `/var/lib/ceph/...`) regardless of the `dataDirHostPath` setting.
 
 ## Known Issues
 

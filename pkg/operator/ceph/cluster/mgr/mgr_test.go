@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+
 package mgr
 
 import (
@@ -25,17 +26,18 @@ import (
 	rookalpha "github.com/rook/rook/pkg/apis/rook.io/v1alpha2"
 	"github.com/rook/rook/pkg/clusterd"
 	testopk8s "github.com/rook/rook/pkg/operator/k8sutil/test"
+	optest "github.com/rook/rook/pkg/operator/test"
 	testop "github.com/rook/rook/pkg/operator/test"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
+	apps "k8s.io/api/apps/v1"
 	"k8s.io/api/core/v1"
-	extensions "k8s.io/api/extensions/v1beta1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestStartMGR(t *testing.T) {
-	var deploymentsUpdated *[]*extensions.Deployment
+	var deploymentsUpdated *[]*apps.Deployment
 	updateDeploymentAndWait, deploymentsUpdated = testopk8s.UpdateDeploymentAndWaitStub()
 
 	executor := &exectest.MockExecutor{
@@ -50,7 +52,18 @@ func TestStartMGR(t *testing.T) {
 		Executor:  executor,
 		ConfigDir: configDir,
 		Clientset: testop.New(3)}
-	c := New(context, "ns", "myversion", cephv1.CephVersionSpec{}, rookalpha.Placement{}, false, cephv1.DashboardSpec{Enabled: true}, v1.ResourceRequirements{}, metav1.OwnerReference{})
+	c := New(
+		context,
+		"ns",
+		"myversion",
+		cephv1.CephVersionSpec{},
+		rookalpha.Placement{},
+		false,
+		cephv1.DashboardSpec{Enabled: true},
+		v1.ResourceRequirements{},
+		metav1.OwnerReference{},
+		optest.CreateConfigDir(1),
+	)
 	defer os.RemoveAll(c.dataDir)
 
 	// start a basic service
@@ -79,14 +92,14 @@ func TestStartMGR(t *testing.T) {
 }
 
 func validateStart(t *testing.T, c *Cluster) {
-
+	mgrNames := []string{"a", "b"}
 	for i := 0; i < c.Replicas; i++ {
-		if i == len(mgrNames) {
+		if i == 2 {
 			break
 		}
 		logger.Infof("Looking for cephmgr replica %d", i)
 		daemonName := mgrNames[i]
-		_, err := c.context.Clientset.ExtensionsV1beta1().Deployments(c.Namespace).Get(fmt.Sprintf("rook-ceph-mgr-%s", daemonName), metav1.GetOptions{})
+		_, err := c.context.Clientset.Apps().Deployments(c.Namespace).Get(fmt.Sprintf("rook-ceph-mgr-%s", daemonName), metav1.GetOptions{})
 		assert.Nil(t, err)
 	}
 
@@ -98,7 +111,7 @@ func validateStart(t *testing.T, c *Cluster) {
 		assert.Nil(t, err)
 		if c.dashboard.Port == 0 {
 			// port=0 -> default port
-			assert.Equal(t, ds.Spec.Ports[0].Port, int32(dashboardPortHttps))
+			assert.Equal(t, ds.Spec.Ports[0].Port, int32(dashboardPortHTTPS))
 		} else {
 			// non-zero ports are configured as-is
 			assert.Equal(t, ds.Spec.Ports[0].Port, int32(c.dashboard.Port))

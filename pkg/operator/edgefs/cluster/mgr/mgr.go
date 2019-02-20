@@ -19,6 +19,7 @@ package mgr
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 
@@ -27,8 +28,8 @@ import (
 	rookalpha "github.com/rook/rook/pkg/apis/rook.io/v1alpha2"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/operator/k8sutil"
+	apps "k8s.io/api/apps/v1"
 	"k8s.io/api/core/v1"
-	extensions "k8s.io/api/extensions/v1beta1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -64,7 +65,8 @@ type Cluster struct {
 	dataVolumeSize  resource.Quantity
 	placement       rookalpha.Placement
 	context         *clusterd.Context
-	HostNetworkSpec edgefsv1alpha1.NetworkSpec
+	hostNetworkSpec edgefsv1alpha1.NetworkSpec
+	dashboardSpec   edgefsv1alpha1.DashboardSpec
 	resources       v1.ResourceRequirements
 	ownerRef        metav1.OwnerReference
 }
@@ -75,7 +77,9 @@ func New(
 	serviceAccount string,
 	dataDirHostPath string,
 	dataVolumeSize resource.Quantity,
-	placement rookalpha.Placement, HostNetworkSpec edgefsv1alpha1.NetworkSpec,
+	placement rookalpha.Placement,
+	hostNetworkSpec edgefsv1alpha1.NetworkSpec,
+	dashboardSpec edgefsv1alpha1.DashboardSpec,
 	resources v1.ResourceRequirements,
 	ownerRef metav1.OwnerReference,
 ) *Cluster {
@@ -95,7 +99,8 @@ func New(
 		Replicas:        1,
 		dataDirHostPath: dataDirHostPath,
 		dataVolumeSize:  dataVolumeSize,
-		HostNetworkSpec: HostNetworkSpec,
+		hostNetworkSpec: hostNetworkSpec,
+		dashboardSpec:   dashboardSpec,
 		resources:       resources,
 		ownerRef:        ownerRef,
 	}
@@ -115,7 +120,7 @@ func (c *Cluster) Start(rookImage string) error {
 	logger.Infof("Mgr Image is %s", rookImage)
 	// start the deployment
 	deployment := c.makeDeployment(appName, c.Namespace, rookImage, 1)
-	if _, err := c.context.Clientset.ExtensionsV1beta1().Deployments(c.Namespace).Create(deployment); err != nil {
+	if _, err := c.context.Clientset.Apps().Deployments(c.Namespace).Create(deployment); err != nil {
 		if !errors.IsAlreadyExists(err) {
 			return fmt.Errorf("failed to create %s deployment. %+v", appName, err)
 		}
@@ -170,7 +175,7 @@ func (c *Cluster) makeMgrService(name string) *v1.Service {
 		},
 		Spec: v1.ServiceSpec{
 			Selector: labels,
-			Type:     v1.ServiceTypeNodePort,
+			Type:     v1.ServiceTypeClusterIP,
 			Ports: []v1.ServicePort{
 				{
 					Name:     "mgr",
@@ -195,7 +200,7 @@ func (c *Cluster) makeRestapiService(name string) *v1.Service {
 		},
 		Spec: v1.ServiceSpec{
 			Selector: labels,
-			Type:     v1.ServiceTypeNodePort,
+			Type:     v1.ServiceTypeClusterIP,
 			Ports: []v1.ServicePort{
 				{
 					Name:     "http-metrics",
@@ -247,10 +252,26 @@ func (c *Cluster) makeUiService(name string) *v1.Service {
 	}
 
 	k8sutil.SetOwnerRef(c.context.Clientset, c.Namespace, &svc.ObjectMeta, &c.ownerRef)
+
+	if c.dashboardSpec.LocalAddr != "" {
+		ip := net.ParseIP(c.dashboardSpec.LocalAddr)
+		if ip == nil {
+			logger.Errorf("wrong dashboard localAddr format")
+			return svc
+		}
+
+		if !ip.IsUnspecified() {
+			logger.Infof("Cluster dashboard assigned with externalIP=%s", c.dashboardSpec.LocalAddr)
+			svc.Spec.ExternalIPs = []string{c.dashboardSpec.LocalAddr}
+		} else {
+			logger.Errorf("Cluster dashboard externalIP cannot be assigned to %s", c.dashboardSpec.LocalAddr)
+		}
+	}
+
 	return svc
 }
 
-func (c *Cluster) makeDeployment(name, clusterName, rookImage string, replicas int32) *extensions.Deployment {
+func (c *Cluster) makeDeployment(name, clusterName, rookImage string, replicas int32) *apps.Deployment {
 
 	volumes := []v1.Volume{}
 	if c.dataVolumeSize.Value() > 0 {
@@ -296,21 +317,27 @@ func (c *Cluster) makeDeployment(name, clusterName, rookImage string, replicas i
 			RestartPolicy: v1.RestartPolicyAlways,
 			Volumes:       volumes,
 			HostIPC:       true,
-			HostNetwork:   isHostNetworkDefined(c.HostNetworkSpec),
+			HostNetwork:   isHostNetworkDefined(c.hostNetworkSpec),
 			NodeSelector:  map[string]string{c.Namespace: "cluster"},
 		},
 	}
-	if isHostNetworkDefined(c.HostNetworkSpec) {
+	if isHostNetworkDefined(c.hostNetworkSpec) {
 		podSpec.Spec.DNSPolicy = v1.DNSClusterFirstWithHostNet
 	}
 	c.placement.ApplyToPodSpec(&podSpec.Spec)
 
-	d := &extensions.Deployment{
+	d := &apps.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: c.Namespace,
 		},
-		Spec: extensions.DeploymentSpec{Template: podSpec, Replicas: &replicas},
+		Spec: apps.DeploymentSpec{
+			Selector: &metav1.LabelSelector{
+				MatchLabels: podSpec.Labels,
+			},
+			Template: podSpec,
+			Replicas: &replicas,
+		},
 	}
 	k8sutil.SetOwnerRef(c.context.Clientset, c.Namespace, &d.ObjectMeta, &c.ownerRef)
 	return d

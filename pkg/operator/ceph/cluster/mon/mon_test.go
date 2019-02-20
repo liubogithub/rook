@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 
@@ -70,6 +71,13 @@ func testGenMonConfig(monID string) *monConfig {
 }
 
 func newTestStartCluster(namespace string) *clusterd.Context {
+	monResponse := func() (string, error) {
+		return clienttest.MonInQuorumResponseMany(3), nil
+	}
+	return newTestStartClusterWithQuorumResponse(namespace, monResponse)
+}
+
+func newTestStartClusterWithQuorumResponse(namespace string, monResponse func() (string, error)) *clusterd.Context {
 	clientset := test.New(3)
 	configDir, _ := ioutil.TempDir("", "")
 	defer os.RemoveAll(configDir)
@@ -82,7 +90,7 @@ func newTestStartCluster(namespace string) *clusterd.Context {
 		},
 		MockExecuteCommandWithOutputFile: func(debug bool, actionName string, command string, outFileArg string, args ...string) (string, error) {
 			// mock quorum health check because a second `Start()` triggers a health check
-			return clienttest.MonInQuorumResponseMany(3), nil
+			return monResponse()
 		},
 	}
 	return &clusterd.Context{
@@ -126,14 +134,16 @@ func TestStartMonPods(t *testing.T) {
 	c := newCluster(context, namespace, false, true, v1.ResourceRequirements{})
 
 	// start a basic cluster
-	err := c.Start()
+	i, err := c.Start()
 	assert.Nil(t, err)
+	assert.Equal(t, i, c.clusterInfo)
 
 	validateStart(t, c)
 
 	// starting again should be a no-op, but still results in an error
-	err = c.Start()
+	i, err = c.Start()
 	assert.Nil(t, err)
+	assert.Equal(t, i, c.clusterInfo)
 
 	validateStart(t, c)
 }
@@ -145,16 +155,18 @@ func TestOperatorRestart(t *testing.T) {
 	c.clusterInfo = test.CreateConfigDir(1)
 
 	// start a basic cluster
-	err := c.Start()
+	i, err := c.Start()
 	assert.Nil(t, err)
+	assert.Equal(t, i, c.clusterInfo)
 
 	validateStart(t, c)
 
 	c = newCluster(context, namespace, false, true, v1.ResourceRequirements{})
 
 	// starting again should be a no-op, but will not result in an error
-	err = c.Start()
+	i, err = c.Start()
 	assert.Nil(t, err)
+	assert.Equal(t, i, c.clusterInfo)
 
 	validateStart(t, c)
 }
@@ -169,8 +181,9 @@ func TestOperatorRestartHostNetwork(t *testing.T) {
 	c.clusterInfo = test.CreateConfigDir(1)
 
 	// start a basic cluster
-	err := c.Start()
+	i, err := c.Start()
 	assert.Nil(t, err)
+	assert.Equal(t, i, c.clusterInfo)
 
 	validateStart(t, c)
 
@@ -178,8 +191,9 @@ func TestOperatorRestartHostNetwork(t *testing.T) {
 	c = newCluster(context, namespace, true, false, v1.ResourceRequirements{})
 
 	// starting again should be a no-op, but still results in an error
-	err = c.Start()
+	i, err = c.Start()
 	assert.Nil(t, err)
+	assert.Equal(t, i, c.clusterInfo)
 
 	validateStart(t, c)
 }
@@ -190,7 +204,7 @@ func validateStart(t *testing.T, c *Cluster) {
 	assert.Equal(t, 4, len(s.StringData))
 
 	// there is only one pod created. the other two won't be created since the first one doesn't start
-	_, err = c.context.Clientset.Extensions().Deployments(c.Namespace).Get("rook-ceph-mon-a", metav1.GetOptions{})
+	_, err = c.context.Clientset.Apps().Deployments(c.Namespace).Get("rook-ceph-mon-a", metav1.GetOptions{})
 	assert.Nil(t, err)
 }
 
@@ -268,4 +282,48 @@ func TestNameToIndex(t *testing.T) {
 	id, err = fullNameToIndex("rook-ceph-mon123")
 	assert.Nil(t, err)
 	assert.Equal(t, 123, id)
+}
+
+func TestWaitForQuorum(t *testing.T) {
+	namespace := "ns"
+	quorumChecks := 0
+	quorumResponse := func() (string, error) {
+		mons := map[string]*cephconfig.MonInfo{
+			"a": {},
+		}
+		quorumChecks++
+		if quorumChecks == 1 {
+			// return an error the first time while we're waiting for the mon to join quorum
+			return "", fmt.Errorf("test error")
+		}
+		// a successful response indicates that we have quorum, even if we didn't check which specific mons were in quorum
+		return clienttest.MonInQuorumResponseFromMons(mons), nil
+	}
+	context := newTestStartClusterWithQuorumResponse(namespace, quorumResponse)
+	requireAllInQuorum := false
+	expectedMons := []string{"a"}
+	err := waitForQuorumWithMons(context, namespace, expectedMons, 0, requireAllInQuorum)
+	assert.Nil(t, err)
+}
+
+func TestMonFoundInQuorum(t *testing.T) {
+	response := client.MonStatusResponse{}
+
+	// "a" is in quorum
+	response.Quorum = []int{0}
+	response.MonMap.Mons = []client.MonMapEntry{
+		{Name: "a", Rank: 0},
+		{Name: "b", Rank: 1},
+		{Name: "c", Rank: 2},
+	}
+	assert.True(t, monFoundInQuorum("a", response))
+	assert.False(t, monFoundInQuorum("b", response))
+	assert.False(t, monFoundInQuorum("c", response))
+
+	// b and c also in quorum, but not d
+	response.Quorum = []int{0, 1, 2}
+	assert.True(t, monFoundInQuorum("a", response))
+	assert.True(t, monFoundInQuorum("b", response))
+	assert.True(t, monFoundInQuorum("c", response))
+	assert.False(t, monFoundInQuorum("d", response))
 }
